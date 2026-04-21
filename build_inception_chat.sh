@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------
 # build_inception_chat.sh – genera una app macOS personal de
-# chat.inceptionlabs.ai con Nativefier (sin firma, sin notarización).
+# chat.inceptionlabs.ai con Nativefier (sin firma, sin notarización)s
 # ------------------------------------------------------------
 
 set -euo pipefail   # aborta en errores y variables no definidas
