@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLAYWRIGHT_OUTPUT_DIR="${SCRIPT_DIR}/output/playwright"
+PLAYWRIGHT_OUTPUT_DIR=""
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 PWCLI="${CODEX_HOME}/skills/playwright/scripts/playwright_cli.sh"
 DEFAULT_USER_AGENT="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -30,7 +30,6 @@ cleanup() {
 
   [[ -n "${WORK_DIR:-}" && -d "${WORK_DIR}" ]] && rm -rf "${WORK_DIR}"
   [[ -n "${PLAYWRIGHT_OUTPUT_DIR:-}" && -d "${PLAYWRIGHT_OUTPUT_DIR}" ]] && rmdir "${PLAYWRIGHT_OUTPUT_DIR}" >/dev/null 2>&1 || true
-  [[ -n "${SCRIPT_DIR:-}" && -d "${SCRIPT_DIR}/output" ]] && rmdir "${SCRIPT_DIR}/output" >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT
@@ -43,8 +42,9 @@ if [[ -z "${TARGET_URL}" ]]; then
   exit 0
 fi
 
-mkdir -p "${PLAYWRIGHT_OUTPUT_DIR}"
-WORK_DIR="$(mktemp -d "${PLAYWRIGHT_OUTPUT_DIR}/.search-auth-domain.XXXXXX")"
+PLAYWRIGHT_OUTPUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/search-auth-domain.XXXXXX")"
+WORK_DIR="${PLAYWRIGHT_OUTPUT_DIR}/work"
+mkdir -p "${WORK_DIR}"
 JSON_FILE="${WORK_DIR}/page.json"
 SESSION_NAME="sa$$"
 

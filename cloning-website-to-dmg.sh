@@ -467,7 +467,7 @@ main() {
         if prompt_yes_no \
           'If this site has strong authentication or blocks embedded browsers, generate a Chrome-based PWA launcher too. Default is No.' \
           'Generate PWA too because this website has strong authentication?' \
-          'n'; then
+          'y'; then
           generate_pwa=true
         else
           rc=$?

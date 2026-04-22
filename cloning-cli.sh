@@ -116,6 +116,8 @@ cleanup() {
   fi
 
   [[ -n "${SESSION_DIR}" && -d "${SESSION_DIR}" ]] && rm -rf "${SESSION_DIR}"
+  [[ -d "${OUTPUT_ROOT_DIR}/playwright" ]] && rmdir "${OUTPUT_ROOT_DIR}/playwright" >/dev/null 2>&1 || true
+  [[ -d "${OUTPUT_ROOT_DIR}" ]] && rmdir "${OUTPUT_ROOT_DIR}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -883,7 +885,7 @@ alpha = img.split()[3]
 
 # Slightly larger corner badge while keeping the original icon untouched.
 side = min(w, h)
-size = max(6, int(side * 0.18))
+size = max(6, int(side * 0.21))
 
 # Keep the badge inside the visible icon shape.
 # Some app icons have transparent rounded corners; if we place the badge at
