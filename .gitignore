@@ -1,2 +1,5 @@
 .DS_Store
 .codex/
+.playwright-cli
+output/
+node_modules/
