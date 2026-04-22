@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLAYWRIGHT_OUTPUT_DIR="${SCRIPT_DIR}/output/playwright"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+PWCLI="${CODEX_HOME}/skills/playwright/scripts/playwright_cli.sh"
+DEFAULT_USER_AGENT="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+usage() {
+  cat <<'EOF'
+Uso:
+  ./search-auth-domain <url> [user-agent]
+
+Descripcion:
+  Intenta detectar dominios externos de autenticacion usando Playwright CLI.
+  Devuelve cero o mas dominios, uno por linea.
+EOF
+}
+
+warn() {
+  printf '[WARN] %s\n' "$*" >&2
+}
+
+cleanup() {
+  if [[ -n "${SESSION_NAME:-}" && -x "${PWCLI}" ]]; then
+    "${PWCLI}" --session "${SESSION_NAME}" close >/dev/null 2>&1 || true
+  fi
+
+  [[ -n "${WORK_DIR:-}" && -d "${WORK_DIR}" ]] && rm -rf "${WORK_DIR}"
+  [[ -n "${PLAYWRIGHT_OUTPUT_DIR:-}" && -d "${PLAYWRIGHT_OUTPUT_DIR}" ]] && rmdir "${PLAYWRIGHT_OUTPUT_DIR}" >/dev/null 2>&1 || true
+  [[ -n "${SCRIPT_DIR:-}" && -d "${SCRIPT_DIR}/output" ]] && rmdir "${SCRIPT_DIR}/output" >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+
+TARGET_URL="${1:-}"
+USER_AGENT="${2:-${DEFAULT_USER_AGENT}}"
+
+if [[ -z "${TARGET_URL}" ]]; then
+  usage
+  exit 0
+fi
+
+mkdir -p "${PLAYWRIGHT_OUTPUT_DIR}"
+WORK_DIR="$(mktemp -d "${PLAYWRIGHT_OUTPUT_DIR}/.search-auth-domain.XXXXXX")"
+JSON_FILE="${WORK_DIR}/page.json"
+SESSION_NAME="sa$$"
+
+if ! command -v npx >/dev/null 2>&1; then
+  warn "npx no esta disponible. Se omite la auto-deteccion."
+  exit 0
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  warn "python3 no esta disponible. Se omite la auto-deteccion."
+  exit 0
+fi
+
+if [[ ! -x "${PWCLI}" ]]; then
+  warn "No se encontro playwright_cli.sh en ${PWCLI}. Se omite la auto-deteccion."
+  exit 0
+fi
+
+if ! "${PWCLI}" --session "${SESSION_NAME}" open "${TARGET_URL}" >/dev/null 2>&1; then
+  warn "Playwright no pudo abrir ${TARGET_URL}. Se omite la auto-deteccion."
+  exit 0
+fi
+
+"${PWCLI}" --session "${SESSION_NAME}" run-code \
+  "await page.waitForLoadState('domcontentloaded').catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {}); await page.waitForTimeout(1000);" \
+  >/dev/null 2>&1 || true
+
+PAGE_DATA="$(
+  "${PWCLI}" --session "${SESSION_NAME}" --raw eval \
+    'JSON.stringify((() => {
+      const clip = (value) => String(value || "").trim().slice(0, 200);
+      const parseMetaRefresh = (content) => {
+        const match = String(content || "").match(/url\s*=\s*([^;]+)/i);
+        return match ? match[1].trim() : "";
+      };
+
+      return {
+        currentUrl: location.href,
+        title: document.title || "",
+        anchors: Array.from(document.querySelectorAll("a[href]")).slice(0, 300).map((anchor) => ({
+          url: anchor.href,
+          text: clip(anchor.textContent),
+          aria: clip(anchor.getAttribute("aria-label")),
+          id: clip(anchor.id),
+          classes: clip(anchor.className)
+        })),
+        forms: Array.from(document.querySelectorAll("form[action]")).slice(0, 150).map((form) => ({
+          url: form.action,
+          method: clip(form.method),
+          id: clip(form.id),
+          name: clip(form.name)
+        })),
+        iframes: Array.from(document.querySelectorAll("iframe[src]")).slice(0, 100).map((frame) => frame.src),
+        resources: performance.getEntriesByType("resource").slice(0, 400).map((entry) => entry.name),
+        metaRefresh: Array.from(document.querySelectorAll("meta[http-equiv]"))
+          .filter((meta) => /refresh/i.test(meta.httpEquiv || ""))
+          .map((meta) => parseMetaRefresh(meta.content))
+      };
+    })())' 2>/dev/null || true
+)"
+
+[[ -n "${PAGE_DATA}" ]] || exit 0
+printf '%s' "${PAGE_DATA}" > "${JSON_FILE}"
+
+python3 - "${TARGET_URL}" "${JSON_FILE}" "${USER_AGENT}" <<'PY'
+import json
+import sys
+from urllib.parse import urljoin, urlsplit
+
+target_url = sys.argv[1]
+json_file = sys.argv[2]
+
+try:
+    with open(json_file, "r", encoding="utf-8") as fh:
+        raw = fh.read().strip()
+    if not raw:
+        raise ValueError("empty")
+    data = json.loads(raw)
+    if isinstance(data, str):
+        data = json.loads(data)
+except Exception:
+    sys.exit(0)
+
+target_parts = urlsplit(target_url)
+target_host = (target_parts.hostname or "").lower().strip(".")
+
+auth_terms = (
+    "auth", "login", "log-in", "signin", "sign-in", "signon", "sign-on",
+    "sso", "oauth", "authorize", "identity", "idp", "account", "accounts",
+    "okta", "auth0", "onelogin", "microsoftonline"
+)
+
+host_terms = (
+    "auth", "login", "signin", "sso", "oauth", "idp", "identity",
+    "okta", "auth0", "accounts", "microsoftonline"
+)
+
+candidates = {}
+
+def normalize_url(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if value.startswith("//"):
+        return f"{target_parts.scheme}:{value}"
+    return urljoin(target_url, value)
+
+def consider(url, source, text=""):
+    url = normalize_url(url)
+    if not url:
+        return
+
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower().strip(".")
+    if parts.scheme not in ("http", "https") or not host:
+        return
+    if host == target_host or host.endswith("." + target_host):
+        return
+
+    haystack = " ".join((url.lower(), text.lower(), source.lower()))
+    score = 0
+
+    if source in {"current", "form", "iframe", "meta"}:
+        score += 2
+    if any(term in haystack for term in auth_terms):
+        score += 5
+    if any(term in host for term in host_terms):
+        score += 4
+    if host.split(".")[0] in host_terms:
+        score += 2
+
+    if score < 3:
+        return
+
+    existing = candidates.get(host, 0)
+    candidates[host] = max(existing, score)
+
+consider(data.get("currentUrl"), "current", data.get("title", ""))
+
+for anchor in data.get("anchors", []):
+    label = " ".join(
+        str(anchor.get(key, "")) for key in ("text", "aria", "id", "classes")
+    )
+    consider(anchor.get("url"), "anchor", label)
+
+for form in data.get("forms", []):
+    label = " ".join(str(form.get(key, "")) for key in ("method", "id", "name"))
+    consider(form.get("url"), "form", label)
+
+for iframe in data.get("iframes", []):
+    consider(iframe, "iframe")
+
+for resource in data.get("resources", []):
+    consider(resource, "resource")
+
+for refresh_target in data.get("metaRefresh", []):
+    consider(refresh_target, "meta")
+
+for domain, _ in sorted(candidates.items(), key=lambda item: (-item[1], item[0])):
+    print(domain)
+PY
