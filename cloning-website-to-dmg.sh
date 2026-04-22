@@ -50,8 +50,83 @@ split_csv_to_array() {
   done
 }
 
+CHROME_LAST_USED_PROFILE=""
+declare -a CHROME_AVAILABLE_PROFILES=()
+
+detect_chrome_profiles() {
+  local local_state_file
+  local kind value
+
+  CHROME_LAST_USED_PROFILE=""
+  CHROME_AVAILABLE_PROFILES=()
+  local_state_file="${HOME}/Library/Application Support/Google/Chrome/Local State"
+
+  [[ -f "${local_state_file}" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  while IFS=$'\t' read -r kind value; do
+    case "${kind}" in
+      LAST_USED)
+        CHROME_LAST_USED_PROFILE="$(trim "${value}")"
+        ;;
+      PROFILE)
+        value="$(trim "${value}")"
+        [[ -n "${value}" ]] || continue
+        CHROME_AVAILABLE_PROFILES+=("${value}")
+        ;;
+    esac
+  done < <(
+    python3 - "${local_state_file}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(0)
+
+profile = data.get("profile") or {}
+last_used = profile.get("last_used") or ""
+if isinstance(last_used, str) and last_used.strip():
+    print(f"LAST_USED\t{last_used.strip()}")
+
+info_cache = profile.get("info_cache") or {}
+seen = set()
+for name in info_cache.keys():
+    if not isinstance(name, str):
+        continue
+    name = name.strip()
+    if not name or name in seen:
+        continue
+    seen.add(name)
+    print(f"PROFILE\t{name}")
+PY
+  )
+}
+
+format_quoted_profile_list() {
+  local rendered=""
+  local profile
+
+  if [[ ${#CHROME_AVAILABLE_PROFILES[@]} -eq 0 ]]; then
+    printf 'none'
+    return 0
+  fi
+
+  for profile in "${CHROME_AVAILABLE_PROFILES[@]}"; do
+    if [[ -n "${rendered}" ]]; then
+      rendered+=", "
+    fi
+    rendered+="\"${profile}\""
+  done
+
+  printf '(%s)' "${rendered}"
+}
+
 PROMPT_RESULT=""
 PROMPT_BACK_CODE=111
+CURRENT_QUESTION_NUMBER=""
 
 read_line_or_back() {
   local output rc
@@ -116,13 +191,15 @@ try:
         if ch == b"\x1b":
             seq = b""
             while True:
-                part = read_next(0.01)
+                part = read_next(0.05)
                 if not part:
                     break
                 seq += part
-                if seq.endswith(b"~"):
+                if seq[-1:] in (b"~", b"A", b"B", b"C", b"D", b"F", b"H"):
                     break
-            if seq == b"[3~" and not answer:
+
+            normalized_seq = seq.decode("ascii", "ignore")
+            if not answer and normalized_seq.startswith("[3") and normalized_seq.endswith("~"):
                 write_err("\n")
                 raise SystemExit(BACK_CODE)
             continue
@@ -160,7 +237,11 @@ prompt_text() {
   local default_value="${3:-}"
   local answer rc
 
-  printf '\n%s\n' "${summary}" >&2
+  if [[ -n "${CURRENT_QUESTION_NUMBER}" ]]; then
+    printf '\n%s. %s\n' "${CURRENT_QUESTION_NUMBER}" "${summary}" >&2
+  else
+    printf '\n%s\n' "${summary}" >&2
+  fi
   if [[ -n "${default_value}" ]]; then
     printf '%s [%s]: ' "${prompt}" "${default_value}" >&2
   else
@@ -217,7 +298,11 @@ prompt_yes_no() {
   fi
 
   while true; do
-    printf '\n%s\n' "${summary}" >&2
+    if [[ -n "${CURRENT_QUESTION_NUMBER}" ]]; then
+      printf '\n%s. %s\n' "${CURRENT_QUESTION_NUMBER}" "${summary}" >&2
+    else
+      printf '\n%s\n' "${summary}" >&2
+    fi
     printf '%s [y/n, empty = %s]: ' "${prompt}" "${empty_label}" >&2
     read_line_or_back
     rc=$?
@@ -243,6 +328,44 @@ prompt_yes_no() {
   done
 }
 
+question_step_enabled() {
+  local step="$1"
+
+  case "${step}" in
+    7)
+      [[ "${create_dmg}" == true ]]
+      ;;
+    11)
+      [[ "${generate_pwa}" == true ]]
+      ;;
+    15)
+      [[ "${add_extra_nativefier_args}" == true ]]
+      ;;
+    16)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+compute_question_number() {
+  local target_step="$1"
+  local step count=0
+
+  for step in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 17; do
+    question_step_enabled "${step}" || continue
+    count=$((count + 1))
+    if [[ "${step}" -eq "${target_step}" ]]; then
+      printf '%s' "${count}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 print_command() {
   local -a cmd=("$@")
   local rendered=""
@@ -259,6 +382,7 @@ main() {
   local app_url="" app_name="" bundle_id="" app_version="1.0.0" icon_file="" dmg_output=""
   local internal_domains_csv="" internal_urls_regex="" user_agent="${DEFAULT_USER_AGENT}" extra_arg=""
   local chrome_profile_directory=""
+  local chrome_profile_summary=""
   local -a internal_domains=()
   local -a extra_nativefier_args=()
   local -a cmd=()
@@ -281,6 +405,12 @@ main() {
   printf 'Interactive website-to-DMG builder\n'
 
   while true; do
+    if CURRENT_QUESTION_NUMBER="$(compute_question_number "${step}" 2>/dev/null)"; then
+      :
+    else
+      CURRENT_QUESTION_NUMBER=""
+    fi
+
     case "${step}" in
       0)
         if prompt_required \
@@ -465,7 +595,7 @@ main() {
         ;;
       10)
         if prompt_yes_no \
-          'If this site has strong authentication or blocks embedded browsers, generate a Chrome-based PWA launcher too. Default is No.' \
+          'If this site has strong authentication or blocks embedded browsers, generate a Chrome-based PWA launcher too. Default is Yes.' \
           'Generate PWA too because this website has strong authentication?' \
           'y'; then
           generate_pwa=true
@@ -481,8 +611,16 @@ main() {
         ;;
       11)
         if [[ "${generate_pwa}" == true ]]; then
+          detect_chrome_profiles
+          chrome_profile_summary='Optional Chrome profile directory for the generated PWA. Example: Default or Profile 1. Empty auto-detects the last-used Chrome profile at launch time.'
+          if [[ -n "${CHROME_LAST_USED_PROFILE}" ]]; then
+            chrome_profile_summary+=" Auto-detected last-used profile now: ${CHROME_LAST_USED_PROFILE}."
+          else
+            chrome_profile_summary+=" Auto-detected last-used profile now: not found."
+          fi
+          chrome_profile_summary+=" Profiles found: $(format_quoted_profile_list)."
           if prompt_text \
-            'Optional Chrome profile directory for the generated PWA. Example: Default or Profile 1. Empty auto-detects the last-used Chrome profile at launch time.' \
+            "${chrome_profile_summary}" \
             'Chrome profile directory for PWA' \
             "${chrome_profile_directory}"; then
             rc=0
@@ -632,7 +770,7 @@ main() {
         ;;
       17)
         if prompt_yes_no \
-          'Final confirmation. Empty runs the generated command now. Delete/Backspace on empty input returns to the previous question.' \
+          'Final confirmation, do you want to run the generated command now?. If you reject it, all questions will start again from the beginning.' \
           'Run this command now?' \
           'y'; then
           exec "${cmd[@]}"
@@ -646,8 +784,29 @@ main() {
             fi
             continue
           fi
-          info "Cancelled. Command not executed."
-          exit 0
+          app_url=""
+          app_name=""
+          bundle_id=""
+          app_version="1.0.0"
+          icon_file=""
+          dmg_output=""
+          internal_domains_csv=""
+          internal_urls_regex=""
+          user_agent="${DEFAULT_USER_AGENT}"
+          extra_arg=""
+          chrome_profile_directory=""
+          chrome_profile_summary=""
+          internal_domains=()
+          extra_nativefier_args=()
+          cmd=()
+          create_dmg=true
+          generate_pwa=false
+          keep_build_artifacts=false
+          keep_nativefier_cache=false
+          add_extra_nativefier_args=false
+          info "Restarting the questionnaire from the beginning."
+          step=0
+          continue
         fi
         ;;
       *)
