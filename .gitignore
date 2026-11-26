@@ -3,3 +3,4 @@
 .playwright-cli
 output/
 node_modules/
+__pycache__/

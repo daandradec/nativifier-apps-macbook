@@ -14,10 +14,7 @@ Uso:
 Descripcion:
   Asistente interactivo que hace preguntas, arma el comando para
   `cloning-cli.sh` y luego lo ejecuta con los parametros elegidos.
-
-Salidas por defecto:
-  - App: ./output/<AppName>/<AppName>.app
-  - DMG: ./output/<AppName>/<AppName> <version>.dmg
+  Elige solo Chrome (por defecto), solo Nativefier o ambos.
 EOF
 }
 
@@ -41,8 +38,11 @@ split_csv_to_array() {
   local csv="$1"
   local array_name="$2"
   local item
+  local -a parts=()
 
+  [[ -n "${csv}" ]] || return 0
   IFS=',' read -r -a parts <<< "${csv}"
+  [[ ${#parts[@]} -gt 0 ]] || return 0
   for item in "${parts[@]}"; do
     item="$(trim "${item}")"
     [[ -n "${item}" ]] || continue
@@ -328,21 +328,23 @@ prompt_yes_no() {
   done
 }
 
+QUESTION_STEPS=(0 10 1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17)
+
 question_step_enabled() {
   local step="$1"
 
   case "${step}" in
+    5|8|9|13|14)
+      [[ "${build_mode}" != chrome ]]
+      ;;
     7)
       [[ "${create_dmg}" == true ]]
       ;;
     11)
-      [[ "${generate_pwa}" == true ]]
+      [[ "${build_mode}" != nativefier ]]
       ;;
     15)
-      [[ "${add_extra_nativefier_args}" == true ]]
-      ;;
-    16)
-      return 1
+      [[ "${build_mode}" != chrome && "${add_extra_nativefier_args}" == true ]]
       ;;
     *)
       return 0
@@ -354,7 +356,8 @@ compute_question_number() {
   local target_step="$1"
   local step count=0
 
-  for step in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 17; do
+  for step in "${QUESTION_STEPS[@]}"; do
+    [[ "${step}" != 16 ]] || continue
     question_step_enabled "${step}" || continue
     count=$((count + 1))
     if [[ "${step}" -eq "${target_step}" ]]; then
@@ -363,6 +366,27 @@ compute_question_number() {
     fi
   done
 
+  return 1
+}
+
+adjacent_question_step() {
+  local target_step="$1" direction="$2" step previous="" found=false
+
+  for step in "${QUESTION_STEPS[@]}"; do
+    question_step_enabled "${step}" || continue
+    if [[ "${step}" == "${target_step}" ]]; then
+      if [[ "${direction}" == back ]]; then
+        printf '%s' "${previous:-${target_step}}"
+        return 0
+      fi
+      found=true
+    elif [[ "${found}" == true ]]; then
+      printf '%s' "${step}"
+      return 0
+    fi
+    # Step 16 assembles the command without asking a question.
+    [[ "${step}" == 16 ]] || previous="${step}"
+  done
   return 1
 }
 
@@ -379,7 +403,7 @@ print_command() {
 }
 
 main() {
-  local app_url="" app_name="" bundle_id="" app_version="1.0.0" icon_file="" dmg_output=""
+  local app_url="" app_name="" suggested_name="" bundle_id="" app_version="1.0.0" icon_file="" dmg_output=""
   local internal_domains_csv="" internal_urls_regex="" user_agent="${DEFAULT_USER_AGENT}" extra_arg=""
   local chrome_profile_directory=""
   local chrome_profile_summary=""
@@ -387,7 +411,7 @@ main() {
   local -a extra_nativefier_args=()
   local -a cmd=()
   local create_dmg=true
-  local generate_pwa=false
+  local build_mode=chrome
   local keep_build_artifacts=false
   local keep_nativefier_cache=false
   local add_extra_nativefier_args=false
@@ -431,11 +455,32 @@ main() {
           printf 'The URL must start with http:// or https://.\n' >&2
           continue
         fi
+        step=10
+        ;;
+      10)
+        if prompt_text \
+          'Choose Chrome only (chrome, recommended for Google sign-in), Nativefier only (nativefier), or both (both).' \
+          'Build mode: chrome / nativefier / both' \
+          "${build_mode}"; then
+          rc=0
+        else
+          rc=$?
+        fi
+        if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
+          step=0
+          continue
+        fi
+        [[ ${rc} -eq 0 ]] || exit "${rc}"
+        case "${PROMPT_RESULT}" in
+          chrome|nativefier|both) build_mode="${PROMPT_RESULT}" ;;
+          *) printf 'Choose chrome, nativefier, or both.\n' >&2; continue ;;
+        esac
         step=1
         ;;
       1)
+        suggested_name="$(bash "${CLI_SCRIPT}" --suggest-name "${app_url}")"
         if prompt_text \
-          'App label used in the bundle name and the default output folder. Empty lets cloning-cli derive it from the domain.' \
+          "Name used for the app and output folder. Leave empty to use the suggested name: ${suggested_name}." \
           'App name' \
           "${app_name}"; then
           rc=0
@@ -443,7 +488,7 @@ main() {
           rc=$?
         fi
         if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
-          step=0
+          step=10
           continue
         fi
         [[ ${rc} -eq 0 ]] || exit "${rc}"
@@ -486,7 +531,7 @@ main() {
         ;;
       4)
         if prompt_text \
-          'Optional local PNG/JPG/JPEG icon. Empty tries to discover the site icon automatically.' \
+          'Optional local PNG/JPG/JPEG or ICNS icon. Empty tries to discover the site icon automatically.' \
           'Icon file path' \
           "${icon_file}"; then
           rc=0
@@ -499,7 +544,7 @@ main() {
         fi
         [[ ${rc} -eq 0 ]] || exit "${rc}"
         icon_file="${PROMPT_RESULT}"
-        step=5
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       5)
         if prompt_text \
@@ -524,17 +569,16 @@ main() {
           'Create a DMG installer?' \
           'y'; then
           create_dmg=true
-          step=7
         else
           rc=$?
           if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
-            step=5
+            step="$(adjacent_question_step "${step}" back)"
             continue
           fi
           create_dmg=false
           dmg_output=""
-          step=8
         fi
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       7)
         if prompt_text \
@@ -551,7 +595,7 @@ main() {
         fi
         [[ ${rc} -eq 0 ]] || exit "${rc}"
         dmg_output="${PROMPT_RESULT}"
-        step=8
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       8)
         if prompt_text \
@@ -591,72 +635,46 @@ main() {
         fi
         [[ ${rc} -eq 0 ]] || exit "${rc}"
         internal_urls_regex="${PROMPT_RESULT}"
-        step=10
-        ;;
-      10)
-        if prompt_yes_no \
-          'If this site has strong authentication or blocks embedded browsers, generate a Chrome-based PWA launcher too. Default is Yes.' \
-          'Generate PWA too because this website has strong authentication?' \
-          'y'; then
-          generate_pwa=true
-        else
-          rc=$?
-          if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
-            step=9
-            continue
-          fi
-          generate_pwa=false
-        fi
-        step=11
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       11)
-        if [[ "${generate_pwa}" == true ]]; then
-          detect_chrome_profiles
-          chrome_profile_summary='Optional Chrome profile directory for the generated PWA. Example: Default or Profile 1. Empty auto-detects the last-used Chrome profile at launch time.'
-          if [[ -n "${CHROME_LAST_USED_PROFILE}" ]]; then
-            chrome_profile_summary+=" Auto-detected last-used profile now: ${CHROME_LAST_USED_PROFILE}."
-          else
-            chrome_profile_summary+=" Auto-detected last-used profile now: not found."
-          fi
-          chrome_profile_summary+=" Profiles found: $(format_quoted_profile_list)."
-          if prompt_text \
-            "${chrome_profile_summary}" \
-            'Chrome profile directory for PWA' \
-            "${chrome_profile_directory}"; then
-            rc=0
-          else
-            rc=$?
-          fi
-          if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
-            step=10
-            continue
-          fi
-          [[ ${rc} -eq 0 ]] || exit "${rc}"
-          chrome_profile_directory="${PROMPT_RESULT}"
-        else
-          chrome_profile_directory=""
+        detect_chrome_profiles
+        chrome_profile_summary='Leave empty to use the last-used Chrome profile. Enter a profile directory only to pin the launcher to it.'
+        if [[ -n "${CHROME_LAST_USED_PROFILE}" ]]; then
+          chrome_profile_summary+=" Last used: ${CHROME_LAST_USED_PROFILE}."
         fi
+        chrome_profile_summary+=" Profiles found: $(format_quoted_profile_list)."
+        if prompt_text \
+          "${chrome_profile_summary}" \
+          'Chrome profile directory (optional)' \
+          "${chrome_profile_directory}"; then
+          rc=0
+        else
+          rc=$?
+        fi
+        if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
+          step="$(adjacent_question_step "${step}" back)"
+          continue
+        fi
+        [[ ${rc} -eq 0 ]] || exit "${rc}"
+        chrome_profile_directory="${PROMPT_RESULT}"
         step=12
         ;;
       12)
         if prompt_yes_no \
-          'Keep temporary build folders created during the build. Useful for debugging Nativefier output.' \
+          'Keep temporary build folders for debugging.' \
           'Keep temporary build artifacts?' \
           'n'; then
           keep_build_artifacts=true
         else
           rc=$?
           if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
-            if [[ "${generate_pwa}" == true ]]; then
-              step=11
-            else
-              step=10
-            fi
+            step="$(adjacent_question_step "${step}" back)"
             continue
           fi
           keep_build_artifacts=false
         fi
-        step=13
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       13)
         if prompt_yes_no \
@@ -730,9 +748,6 @@ main() {
         if [[ -n "${icon_file}" ]]; then
           cmd+=("--icon" "${icon_file}")
         fi
-        if [[ -n "${user_agent}" ]]; then
-          cmd+=("--user-agent" "${user_agent}")
-        fi
         if [[ "${create_dmg}" == true ]]; then
           if [[ -n "${dmg_output}" ]]; then
             cmd+=("--dmg-output" "${dmg_output}")
@@ -740,29 +755,34 @@ main() {
         else
           cmd+=("--no-dmg")
         fi
-        if [[ ${#internal_domains[@]} -gt 0 ]]; then
-          for domain in "${internal_domains[@]}"; do
-            cmd+=("--internal-domain" "${domain}")
-          done
-        fi
-        if [[ -n "${internal_urls_regex}" ]]; then
-          cmd+=("--internal-urls-regex" "${internal_urls_regex}")
-        fi
-        if [[ "${generate_pwa}" == true ]]; then
-          cmd+=("--generate-pwa")
-          if [[ -n "${chrome_profile_directory}" ]]; then
-            cmd+=("--chrome-profile-directory" "${chrome_profile_directory}")
-          fi
+        case "${build_mode}" in
+          chrome) cmd+=("--chrome-only") ;;
+          both) cmd+=("--generate-pwa") ;;
+        esac
+        if [[ "${build_mode}" != nativefier && -n "${chrome_profile_directory}" ]]; then
+          cmd+=("--chrome-profile-directory" "${chrome_profile_directory}")
         fi
         if [[ "${keep_build_artifacts}" == true ]]; then
           cmd+=("--keep-build-artifacts")
         fi
-        if [[ "${keep_nativefier_cache}" == true ]]; then
-          cmd+=("--keep-nativefier-cache")
-        fi
-        if [[ ${#extra_nativefier_args[@]} -gt 0 ]]; then
-          cmd+=("--")
-          cmd+=("${extra_nativefier_args[@]}")
+        if [[ "${build_mode}" != chrome ]]; then
+          if [[ -n "${user_agent}" ]]; then
+            cmd+=("--user-agent" "${user_agent}")
+          fi
+          if [[ ${#internal_domains[@]} -gt 0 ]]; then
+            for domain in "${internal_domains[@]}"; do
+              cmd+=("--internal-domain" "${domain}")
+            done
+          fi
+          if [[ -n "${internal_urls_regex}" ]]; then
+            cmd+=("--internal-urls-regex" "${internal_urls_regex}")
+          fi
+          if [[ "${keep_nativefier_cache}" == true ]]; then
+            cmd+=("--keep-nativefier-cache")
+          fi
+          if [[ "${add_extra_nativefier_args}" == true && ${#extra_nativefier_args[@]} -gt 0 ]]; then
+            cmd+=("--" "${extra_nativefier_args[@]}")
+          fi
         fi
 
         printf '\nGenerated command:\n%s\n' "$(print_command "${cmd[@]}")"
@@ -777,11 +797,7 @@ main() {
         else
           rc=$?
           if [[ ${rc} -eq ${PROMPT_BACK_CODE} ]]; then
-            if [[ "${add_extra_nativefier_args}" == true ]]; then
-              step=15
-            else
-              step=14
-            fi
+            step="$(adjacent_question_step "${step}" back)"
             continue
           fi
           app_url=""
@@ -800,7 +816,7 @@ main() {
           extra_nativefier_args=()
           cmd=()
           create_dmg=true
-          generate_pwa=false
+          build_mode=chrome
           keep_build_artifacts=false
           keep_nativefier_cache=false
           add_extra_nativefier_args=false
