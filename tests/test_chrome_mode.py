@@ -6,6 +6,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -94,6 +95,40 @@ class ChromeModeTests(unittest.TestCase):
         self.assertTrue(os.access(executable, os.X_OK))
         self.assertIn("--app=${APP_URL}", executable.read_text())
         self.assertTrue((self.work / "custom.dmg").is_file())
+        self.assert_detached_launcher(executable)
+
+    def assert_detached_launcher(self, executable):
+        fake_chrome = self.work / "fake Chrome"
+        args_log = self.work / "chrome-args"
+        release = self.work / "release-chrome"
+        fake_chrome.write_text(
+            '#!/bin/bash\nprintf "%s\\n" "$@" > "$CHROME_ARGS_LOG"\n'
+            'while [[ ! -e "$RELEASE_CHROME" ]]; do sleep 0.1; done\n'
+        )
+        fake_chrome.chmod(0o755)
+        fixture = self.work / "launcher"
+        fixture.write_text("\n".join(
+            f"CHROME_BINARY={shlex.quote(str(fake_chrome))}"
+            if line.startswith("CHROME_BINARY=") else line
+            for line in executable.read_text().splitlines()
+        ) + "\n")
+        env = {**self.env, "CHROME_ARGS_LOG": str(args_log), "RELEASE_CHROME": str(release),
+               "CHROME_PROFILE_DIRECTORY": "Profile 2"}
+        try:
+            completed = subprocess.run(
+                ["/bin/bash", str(fixture)], env=env, timeout=5, check=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.stdout, b"")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if args_log.exists() and "--app=https://github.com/" in args_log.read_text():
+                    break
+                time.sleep(0.05)
+            self.assertIn("--profile-directory=Profile 2", args_log.read_text().splitlines())
+            self.assertIn("--app=https://github.com/", args_log.read_text().splitlines())
+        finally:
+            release.touch()
 
     @unittest.skipUnless(sys.platform == "darwin", "uses macOS icon tools")
     def test_generate_pwa_still_builds_both(self):

@@ -760,7 +760,14 @@ fi
   printf '\n'
 } >>"\${LOG_FILE}" 2>&1
 
-exec "\${CHROME_BINARY}" "\${CHROME_ARGS[@]}" >>"\${LOG_FILE}" 2>&1
+if [[ ! -x "\${CHROME_BINARY}" ]]; then
+  printf 'No se encontro el ejecutable de Chrome: %s\n' "\${CHROME_BINARY}" >>"\${LOG_FILE}" 2>&1
+  exit 1
+fi
+
+# Replacing this process with Chrome makes macOS reopen Chrome itself on a
+# second click, which can create a regular browser window instead of the app.
+/usr/bin/nohup "\${CHROME_BINARY}" "\${CHROME_ARGS[@]}" </dev/null >>"\${LOG_FILE}" 2>&1 &
 EOF
   chmod +x "${launcher_script}"
 
