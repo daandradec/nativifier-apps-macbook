@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------
 # cloning-cli.sh
-# Genera una app macOS con Nativefier o un lanzador de Google Chrome,
-# con un DMG opcional.
+# Empaqueta una app macOS con Nativefier o guía la instalación en Chrome.
 # ------------------------------------------------------------
 
 set -euo pipefail
@@ -19,8 +18,7 @@ APP_VERSION="1.0.0"
 ICON_FILE=""
 USER_AGENT="${DEFAULT_USER_AGENT}"
 CREATE_DMG=true
-GENERATE_PWA=false
-CHROME_ONLY=false
+APP_MODE=nativefier
 KEEP_BUILD_ARTIFACTS=false
 CLEAR_NATIVEFIER_CACHE=true
 DMG_OUTPUT=""
@@ -30,10 +28,6 @@ OUTPUT_ROOT_DIR="${SCRIPT_DIR}/output"
 OUTPUT_DIR=""
 DEPRECATED_INSTALL_FLAG_USED=false
 KNOWN_EMBEDDED_LOGIN_LIMITS=false
-PWA_APP_NAME=""
-PWA_APP_PATH=""
-PWA_DMG_OUTPUT=""
-PWA_ICON_ICNS=""
 
 declare -a EXTRA_INTERNAL_DOMAINS=()
 declare -a EXTRA_NATIVEFIER_ARGS=()
@@ -49,10 +43,13 @@ usage() {
   cat <<'EOF'
 Uso:
   ./cloning-cli.sh --url URL [opciones] [-- nativefier_args...]
+  bash cloning-cli.sh --url URL --pwa
+  bash cloning-cli.sh --url URL --chrome-window-simple [--no-dmg]
+  bash cloning-cli.sh --url URL --pwa-manual-guide [--chrome-profile-directory X]
   bash cloning-cli.sh --suggest-name URL  # Muestra el nombre por defecto sin generar archivos.
 
 Opciones:
-  --url URL                     URL del sitio a empaquetar. Requerido.
+  --url URL                     URL del sitio. Requerido.
   --name NAME                   Nombre de la app. Si se omite, se deriva del dominio.
   --bundle-id ID                Bundle ID de macOS. Default: com.local.webclone.<slug>
   --version VERSION             Version de la app/DMG. Default: 1.0.0
@@ -63,21 +60,20 @@ Opciones:
   --internal-urls-regex REGEX   Regex completa para Nativefier --internal-urls.
   --user-agent STRING           User-Agent custom para iconos y Nativefier.
   --no-dmg                      No crear DMG.
-  --chrome-only                 Genera solo un lanzador de Google Chrome, sin Nativefier.
-  --generate-pwa                Genera Nativefier y un lanzador de Chrome adicional.
-  --chrome-profile-directory X  Perfil para el lanzador de Chrome. Ej: Default, Profile 1.
-                                Si se omite, Chrome usa su ultimo perfil activo.
+  --pwa                         Instala una PWA real mediante Chrome en un perfil separado.
+  --chrome-window-simple        Empaqueta un acceso Chrome --app; no registra una PWA.
+  --pwa-manual-guide            Abre Chrome y muestra los pasos de instalación manual.
+  --chrome-profile-directory X  Perfil para --pwa-manual-guide (ej: Default o Profile 1).
   --keep-build-artifacts        Conserva archivos temporales de compilacion.
   --keep-nativefier-cache       No borra la cache de Nativefier antes de compilar.
   --install-dir PATH            Opcion deprecada; ahora se ignora.
   --no-install                  Opcion deprecada; ahora se ignora.
   -h, --help                    Muestra esta ayuda.
 
-Salidas:
+Salidas de empaquetado:
   - App: ./output/<AppName>/<AppName>.app
   - DMG: ./output/<AppName>/<AppName> <version>.dmg
-  - --chrome-only: ./output/<AppName> (Chrome)/<AppName>.app y DMG.
-  - --generate-pwa: agrega <AppName> PWA.app y su DMG en ./output/<AppName>/.
+  - --chrome-window-simple usa ./output/<AppName> (Chrome Window Simple)/.
   - --dmg-output solo cambia la ruta del DMG, no la carpeta de la app.
 
 Notas:
@@ -86,7 +82,7 @@ Notas:
     search-auth-domain intenta detectar dominios de autenticacion.
 
 Ejemplos:
-  bash cloning-cli.sh --url https://github.com/ --chrome-only
+  bash cloning-cli.sh --url https://github.com/ --pwa
 
   ./cloning-cli.sh \
     --url https://chat.openai.com \
@@ -95,7 +91,6 @@ Ejemplos:
   ./cloning-cli.sh \
     --url https://app.example.com \
     --name ExampleApp \
-    --generate-pwa \
     --internal-domain login.example.com \
     -- --inject ./custom.js
 EOF
@@ -124,8 +119,6 @@ cleanup() {
   [[ -d "${OUTPUT_ROOT_DIR}" ]] && rmdir "${OUTPUT_ROOT_DIR}" >/dev/null 2>&1 || true
   return 0
 }
-
-trap cleanup EXIT
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "No se encontro el comando requerido: $1"
@@ -496,7 +489,10 @@ check_node_version() {
 preflight_checks() {
   [[ "$(uname -s)" == "Darwin" ]] || die "Este script esta pensado para macOS."
 
-  if [[ "${CHROME_ONLY}" != true ]]; then
+  if [[ "${APP_MODE}" == chrome-window-simple ]]; then
+    find_chrome_binary >/dev/null || die "No se encontro Google Chrome."
+    require_command python3
+  else
     require_command node
     require_command npx
   fi
@@ -508,12 +504,6 @@ preflight_checks() {
 
   if [[ "${CREATE_DMG}" == true ]]; then
     require_command hdiutil
-  fi
-
-  if [[ "${GENERATE_PWA}" == true ]]; then
-    require_command iconutil
-    require_command python3
-    find_chrome_binary >/dev/null || die "No se encontro Google Chrome."
   fi
 }
 
@@ -699,283 +689,89 @@ find_chrome_binary() {
   return 1
 }
 
-create_pwa_launcher_app() {
-  local chrome_binary launcher_dir launcher_script plist_file resources_dir
-  local escaped_chrome_binary escaped_app_url escaped_profile_directory escaped_app_slug
-  local icon_resource="" chrome_suffix=pwa
+guide_pwa_install() {
+  local chrome_binary chrome_bundle profile="${PWA_CHROME_PROFILE_DIRECTORY}"
 
-  chrome_binary="$(find_chrome_binary || true)"
-  [[ -n "${chrome_binary}" ]] || die "No se encontro Google Chrome."
-  if [[ "${CHROME_ONLY}" == true ]]; then
-    chrome_suffix=chrome
+  [[ "$(uname -s)" == Darwin ]] || die "La instalacion guiada requiere macOS."
+  chrome_binary="$(find_chrome_binary)" || die "No se encontro Google Chrome."
+  chrome_bundle="${chrome_binary%/Contents/MacOS/Google Chrome}"
+
+  if [[ -n "${profile}" ]]; then
+    case "${profile}" in
+      .|..|*/*) die "Usa el nombre del directorio del perfil, por ejemplo Default o Profile 1." ;;
+    esac
+    [[ -d "${HOME}/Library/Application Support/Google/Chrome/${profile}" ]] ||
+      die "No se encontro el perfil de Chrome «${profile}»."
   fi
 
-  launcher_dir="${PWA_APP_PATH}/Contents/MacOS"
-  resources_dir="${PWA_APP_PATH}/Contents/Resources"
-  launcher_script="${launcher_dir}/${PWA_APP_NAME}"
-  plist_file="${PWA_APP_PATH}/Contents/Info.plist"
-  escaped_chrome_binary="$(printf '%q' "${chrome_binary}")"
-  escaped_app_url="$(printf '%q' "${APP_URL}")"
-  escaped_profile_directory="$(printf '%q' "${PWA_CHROME_PROFILE_DIRECTORY}")"
-  escaped_app_slug="$(printf '%q' "${APP_SLUG}")"
-
-  rm -rf "${PWA_APP_PATH}"
-  mkdir -p "${launcher_dir}" "${resources_dir}"
-
-  cat > "${launcher_script}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-CHROME_BINARY=${escaped_chrome_binary}
-APP_URL=${escaped_app_url}
-APP_SLUG=${escaped_app_slug}
-CONFIGURED_PROFILE_DIRECTORY=${escaped_profile_directory}
-PROFILE_DIRECTORY="\${CHROME_PROFILE_DIRECTORY:-\${CONFIGURED_PROFILE_DIRECTORY}}"
-
-LOG_DIR="\${HOME}/Library/Logs"
-LOG_FILE="\${LOG_DIR}/\${APP_SLUG}-${chrome_suffix}.log"
-mkdir -p "\${LOG_DIR}" 2>/dev/null || LOG_FILE="/tmp/\${APP_SLUG}-${chrome_suffix}.log"
-
-# Let Chrome choose its last-used profile unless a specific profile is pinned.
-CHROME_ARGS=(
-  "--disable-background-timer-throttling"
-  "--disable-backgrounding-occluded-windows"
-  "--disable-renderer-backgrounding"
-  "--app=\${APP_URL}"
-)
-
-if [[ -n "\${CHROME_USER_DATA_DIR:-}" ]]; then
-  CHROME_ARGS=("--user-data-dir=\${CHROME_USER_DATA_DIR}" "\${CHROME_ARGS[@]}")
-fi
-
-if [[ -n "\${PROFILE_DIRECTORY}" ]]; then
-  CHROME_ARGS=("--profile-directory=\${PROFILE_DIRECTORY}" "\${CHROME_ARGS[@]}")
-fi
-
-{
-  printf '[%s] Launching %s' "\$(date '+%Y-%m-%d %H:%M:%S')" "\${APP_URL}"
-  if [[ -n "\${PROFILE_DIRECTORY}" ]]; then
-    printf ' (profile: %s)' "\${PROFILE_DIRECTORY}"
+  info "Abriendo ${APP_URL} en Google Chrome."
+  info "En Chrome: ⋮ → Enviar, guardar y compartir → Instalar página como aplicación."
+  info "Confirma el nombre y la instalacion en Chrome. Este modo no crea un DMG."
+  if [[ -n "${profile}" ]]; then
+    # -n hands the explicit profile and URL to Chrome's existing-session
+    # routing even if the browser is already running.
+    /usr/bin/open -n -a "${chrome_bundle}" --args "--profile-directory=${profile}" "${APP_URL}"
+  else
+    /usr/bin/open -a "${chrome_bundle}" "${APP_URL}"
   fi
-  printf '\n'
-} >>"\${LOG_FILE}" 2>&1
+}
 
-if [[ ! -x "\${CHROME_BINARY}" ]]; then
-  printf 'No se encontro el ejecutable de Chrome: %s\n' "\${CHROME_BINARY}" >>"\${LOG_FILE}" 2>&1
-  exit 1
-fi
+install_real_pwa() {
+  local chrome_binary
+  [[ "$(uname -s)" == Darwin ]] || die "La instalacion PWA requiere macOS."
+  require_command python3
+  chrome_binary="$(find_chrome_binary)" || die "No se encontro Google Chrome."
+  info "Buscando la PWA en ${APP_URL}. Si no está instalada, Chrome usará un perfil nuevo."
+  python3 "${SCRIPT_DIR}/install_chrome_pwa.py" "${chrome_binary}" "${APP_URL}"
+}
 
-# Replacing this process with Chrome makes macOS reopen Chrome itself on a
-# second click, which can create a regular browser window instead of the app.
-/usr/bin/nohup "\${CHROME_BINARY}" "\${CHROME_ARGS[@]}" </dev/null >>"\${LOG_FILE}" 2>&1 &
+create_chrome_window_app() {
+  local contents="${TARGET_PATH}/Contents" icon="${ICON_FILE:-${AUTO_ICON_FILE}}"
+  local icon_name=""
+  mkdir -p "${contents}/MacOS" "${contents}/Resources"
+  {
+    printf '#!/bin/bash\nset -eu\n'
+    printf 'APP_URL=%q\n' "${APP_URL}"
+    cat <<'EOF'
+exec /usr/bin/open -g -n -b com.google.Chrome --args "--app=${APP_URL}"
 EOF
-  chmod +x "${launcher_script}"
-
-  if [[ -n "${PWA_ICON_ICNS}" && -f "${PWA_ICON_ICNS}" ]]; then
-    icon_resource="AppIcon.icns"
-    cp "${PWA_ICON_ICNS}" "${resources_dir}/${icon_resource}"
+  } >"${contents}/MacOS/Launch"
+  chmod +x "${contents}/MacOS/Launch"
+  if [[ -n "${icon}" && -f "${icon}" ]]; then
+    if [[ "${icon}" == *.icns ]]; then
+      cp "${icon}" "${contents}/Resources/AppIcon.icns"
+      icon_name=AppIcon.icns
+    elif sips -s format icns "${icon}" --out "${contents}/Resources/AppIcon.icns" >/dev/null 2>&1; then
+      icon_name=AppIcon.icns
+    else
+      warn "No se pudo convertir el icono; se usara el de macOS."
+    fi
   fi
-
-  python3 - "${plist_file}" "${PWA_APP_NAME}" "${BUNDLE_ID}.${chrome_suffix}" "${APP_VERSION}" "${icon_resource}" <<'PY'
+  python3 - "${contents}/Info.plist" "${APP_NAME}" "${BUNDLE_ID}" "${APP_VERSION}" "${icon_name}" <<'PY'
 import plistlib
 import sys
 
-plist_path, app_name, bundle_id, app_version, icon_resource = sys.argv[1:]
-data = {
-    "CFBundleDevelopmentRegion": "en",
-    "CFBundleExecutable": app_name,
-    "CFBundleIdentifier": bundle_id,
-    "CFBundleDisplayName": app_name,
-    "CFBundleInfoDictionaryVersion": "6.0",
-    "CFBundleName": app_name,
-    "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": app_version,
-    "CFBundleVersion": app_version,
-    "NSHighResolutionCapable": True,
-}
-if icon_resource:
-    data["CFBundleIconFile"] = icon_resource
-
-with open(plist_path, "wb") as fh:
-    plistlib.dump(data, fh)
+path, name, bundle_id, version, icon = sys.argv[1:]
+data = {"CFBundleName": name, "CFBundleDisplayName": name,
+        "CFBundleExecutable": "Launch", "CFBundleIdentifier": bundle_id,
+        "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version,
+        "CFBundleVersion": version}
+if icon:
+    data["CFBundleIconFile"] = icon
+with open(path, "wb") as f:
+    plistlib.dump(data, f)
 PY
-
-  printf 'APPL????' > "${PWA_APP_PATH}/Contents/PkgInfo"
-
-  info "Lanzador de Chrome creado en ${PWA_APP_PATH}"
-}
-
-generate_pwa_icon_if_possible() {
-  local source_image icon_workspace iconset_dir source_iconset="" png_source badge_icns
-  local size draw_badge=true
-
-  [[ "${GENERATE_PWA}" == true ]] || return 0
-
-  source_image="${ICON_FILE}"
-  if [[ "${CHROME_ONLY}" != true && -f "${TARGET_PATH}/Contents/Resources/electron.icns" ]]; then
-    source_image="${TARGET_PATH}/Contents/Resources/electron.icns"
-  fi
-  [[ -n "${source_image}" && -f "${source_image}" ]] || return 0
-
-  if ! python3 -c 'from PIL import Image, ImageDraw' >/dev/null 2>&1; then
-    draw_badge=false
-    warn "Pillow no esta disponible; se usara el icono original sin distintivo."
-  fi
-
-  icon_workspace="${SESSION_DIR}/pwa-icon"
-  iconset_dir="${icon_workspace}/AppIcon.iconset"
-  mkdir -p "${iconset_dir}"
-
-  if [[ "${source_image##*.}" == "icns" ]]; then
-    if sips -g format "${source_image}" 2>/dev/null | grep -q 'format: icns'; then
-      PWA_ICON_ICNS="${source_image}"
-      [[ "${draw_badge}" == true ]] || return 0
-    fi
-    source_iconset="${icon_workspace}/Source.iconset"
-    if ! iconutil -c iconset "${source_image}" -o "${source_iconset}" >/dev/null 2>&1; then
-      source_iconset=""
-    fi
-  fi
-
-  if [[ -n "${source_iconset:-}" && -d "${source_iconset}" ]]; then
-    cp -R "${source_iconset}/." "${iconset_dir}/"
-  else
-    png_source="${icon_workspace}/source.png"
-    if ! sips -s format png "${source_image}" --out "${png_source}" >/dev/null 2>&1; then
-      warn "No se pudo convertir el icono a PNG para la PWA. La PWA se generara sin icono personalizado."
-      return 0
-    fi
-
-    for size in 16 32 128 256 512; do
-      sips -z "${size}" "${size}" "${png_source}" --out "${iconset_dir}/icon_${size}x${size}.png" >/dev/null 2>&1 || return 0
-    done
-
-    sips -z 32 32 "${png_source}" --out "${iconset_dir}/icon_16x16@2x.png" >/dev/null 2>&1 || return 0
-    sips -z 64 64 "${png_source}" --out "${iconset_dir}/icon_32x32@2x.png" >/dev/null 2>&1 || return 0
-    sips -z 256 256 "${png_source}" --out "${iconset_dir}/icon_128x128@2x.png" >/dev/null 2>&1 || return 0
-    sips -z 512 512 "${png_source}" --out "${iconset_dir}/icon_256x256@2x.png" >/dev/null 2>&1 || return 0
-    sips -z 1024 1024 "${png_source}" --out "${iconset_dir}/icon_512x512@2x.png" >/dev/null 2>&1 || return 0
-  fi
-
-  if [[ -z "${PWA_ICON_ICNS}" ]]; then
-    local base_icns="${icon_workspace}/AppIcon.icns"
-    if ! iconutil -c icns "${iconset_dir}" -o "${base_icns}" >/dev/null 2>&1; then
-      warn "No se pudo generar el ICNS para Chrome; se usara el icono por defecto."
-      return 0
-    fi
-    PWA_ICON_ICNS="${base_icns}"
-  fi
-  [[ "${draw_badge}" == true ]] || return 0
-
-  badge_icns="${icon_workspace}/BadgedAppIcon.icns"
-  if python3 - "${iconset_dir}" 2>/dev/null <<'PY'
-from pathlib import Path
-from PIL import Image, ImageDraw
-import sys
-
-def add_badge(icon_path):
-    img = Image.open(icon_path).convert("RGBA")
-    w, h = img.size
-
-    draw = ImageDraw.Draw(img, "RGBA")
-    alpha = img.split()[3]
-
-    # Slightly larger corner badge while keeping the original icon untouched.
-    side = min(w, h)
-    size = max(6, int(side * 0.21))
-
-    # Keep the badge inside the visible icon shape.
-    # Some app icons have transparent rounded corners; if we place the badge at
-    # the extreme bottom-right it can be clipped and appear to disappear.
-    diag_inset = 0
-    limit = max(1, side // 2)
-    for i in range(limit):
-        x = w - 1 - i
-        y = h - 1 - i
-        if x < 0 or y < 0:
-            break
-        if alpha.getpixel((x, y)) > 24:
-            diag_inset = i
-            break
-
-    base_pad = max(6, int(side * 0.012))
-    safe_pad = max(base_pad, diag_inset + max(2, int(side * 0.01)))
-
-    # Move the badge inward so it sits closer to the logo instead of hugging
-    # the extreme rounded corner.
-    visual_inset = max(2, int(side * 0.025))
-    pad = safe_pad + visual_inset
-
-    left = w - size - pad
-    top = h - size - pad
-    right = w - pad
-    bottom = h - pad
-
-    if left < 0:
-        shift = -left
-        left += shift
-        right += shift
-    if top < 0:
-        shift = -top
-        top += shift
-        bottom += shift
-    if right > w - 1:
-        shift = right - (w - 1)
-        right -= shift
-        left -= shift
-    if bottom > h - 1:
-        shift = bottom - (h - 1)
-        bottom -= shift
-        top -= shift
-
-    a = (right, top)
-    b = (right, bottom)
-    c = (left, bottom)
-    centroid = ((a[0] + b[0] + c[0]) // 3, (a[1] + b[1] + c[1]) // 3)
-
-    draw.polygon([a, centroid, c], fill=(239, 68, 68, 240))
-    draw.polygon([a, b, centroid], fill=(34, 197, 94, 240))
-    draw.polygon([centroid, b, c], fill=(59, 130, 246, 240))
-
-    border_w = max(1, int(min(w, h) * 0.0025))
-    half_border_w = 1
-
-    # Full black perimeter as base.
-    draw.line([a, b], fill=(0, 0, 0, 245), width=border_w)
-    draw.line([b, c], fill=(0, 0, 0, 245), width=border_w)
-    draw.line([c, a], fill=(0, 0, 0, 245), width=border_w)
-
-    # White half-border on the top and diagonal edges for contrast.
-    draw.line([a, ((a[0] + b[0]) // 2, (a[1] + b[1]) // 2)], fill=(255, 255, 255, 245), width=half_border_w)
-    draw.line([((c[0] + a[0]) // 2, (c[1] + a[1]) // 2), a], fill=(255, 255, 255, 245), width=half_border_w)
-
-    img.save(icon_path)
-
-for icon_path in sorted(Path(sys.argv[1]).glob("*.png")):
-    add_badge(icon_path)
-PY
-  then
-    if iconutil -c icns "${iconset_dir}" -o "${badge_icns}" >/dev/null 2>&1; then
-      PWA_ICON_ICNS="${badge_icns}"
-      return 0
-    fi
-  fi
-  warn "No se pudo generar el distintivo de Chrome; se conserva el icono original."
-}
-
-create_pwa_if_requested() {
-  [[ "${GENERATE_PWA}" == true ]] || return 0
-
-  create_pwa_launcher_app
-
-  if [[ "${CREATE_DMG}" == true ]]; then
-    create_dmg_for_app "${PWA_APP_PATH}" "${PWA_DMG_OUTPUT}" "${PWA_APP_NAME}" "/$(escape_regex "${PWA_APP_NAME}").*\\.dmg$"
-  fi
 }
 
 create_dmg_if_requested() {
   [[ "${CREATE_DMG}" == true ]] || return 0
   create_dmg_for_app "${TARGET_PATH}" "${DMG_OUTPUT}" "${APP_NAME}" "/${APP_NAME}.*\\.dmg$"
+}
+
+select_app_mode() {
+  [[ "${APP_MODE}" == nativefier || "${APP_MODE}" == "$1" ]] ||
+    die "Elige un solo modo: --pwa, --chrome-window-simple o --pwa-manual-guide."
+  APP_MODE="$1"
 }
 
 parse_args() {
@@ -1025,12 +821,16 @@ parse_args() {
         CREATE_DMG=false
         shift
         ;;
-      --generate-pwa)
-        GENERATE_PWA=true
+      --pwa)
+        select_app_mode pwa
         shift
         ;;
-      --chrome-only)
-        CHROME_ONLY=true
+      --chrome-window-simple)
+        select_app_mode chrome-window-simple
+        shift
+        ;;
+      --pwa-manual-guide|--install-pwa)
+        select_app_mode pwa-manual-guide
         shift
         ;;
       --keep-build-artifacts)
@@ -1068,9 +868,6 @@ parse_args() {
 validate_config() {
   local default_filename
 
-  [[ -n "${APP_URL}" ]] || die "Debes indicar --url."
-  [[ "${APP_URL}" =~ ^https?:// ]] || die "La URL debe comenzar con http:// o https://."
-
   if [[ -z "${APP_NAME}" ]]; then
     APP_NAME="$(derive_app_name_from_url "${APP_URL}")"
   fi
@@ -1080,31 +877,23 @@ validate_config() {
 
   if [[ -z "${BUNDLE_ID}" ]]; then
     BUNDLE_ID="com.local.webclone.${APP_SLUG}"
+    # Preserve the bundle identity of apps built before the mode was renamed.
+    [[ "${APP_MODE}" != chrome-window-simple ]] || BUNDLE_ID+=".pwa-basic"
   fi
 
-  if [[ "${CHROME_ONLY}" == true ]]; then
-    [[ "${GENERATE_PWA}" != true ]] || die "Usa --chrome-only o --generate-pwa, no ambos."
-    if [[ ${#EXTRA_INTERNAL_DOMAINS[@]} -gt 0 || -n "${RAW_INTERNAL_URLS_REGEX}" ||
-          ${#EXTRA_NATIVEFIER_ARGS[@]} -gt 0 || "${CLEAR_NATIVEFIER_CACHE}" != true ]]; then
-      die "Las opciones de Nativefier no se pueden usar con --chrome-only."
-    fi
-    GENERATE_PWA=true
-  elif is_google_embedded_login_target "${APP_URL}"; then
+  if [[ "${APP_MODE}" == nativefier ]] && is_google_embedded_login_target "${APP_URL}"; then
     KNOWN_EMBEDDED_LOGIN_LIMITS=true
     warn "Google/Gemini suele bloquear el inicio de sesion en navegadores embebidos como Electron/Nativefier."
     warn "Este script puede construir la app, pero no puede reutilizar la sesion actual de Chrome/Safari ni garantizar login dentro de Gemini."
-    warn "La alternativa fiable para Gemini es usar Chrome directamente, por ejemplo como PWA o con un lanzador de Chrome --app."
+    warn "La alternativa es instalar la app web en Chrome con --pwa o --pwa-manual-guide."
   fi
 
   OUTPUT_DIR="${OUTPUT_ROOT_DIR}/${APP_NAME}"
-  TARGET_PATH="${OUTPUT_DIR}/${APP_NAME}.app"
-  PWA_APP_NAME="${APP_NAME} PWA"
-  if [[ "${CHROME_ONLY}" == true ]]; then
-    PWA_APP_NAME="${APP_NAME}"
-    OUTPUT_DIR="${OUTPUT_ROOT_DIR}/${APP_NAME} (Chrome)"
+  if [[ "${APP_MODE}" == chrome-window-simple ]]; then
+    [[ "${APP_NAME}" != */* ]] || die "El nombre de la app no puede contener /."
+    OUTPUT_DIR+=" (Chrome Window Simple)"
   fi
-  PWA_APP_PATH="${OUTPUT_DIR}/${PWA_APP_NAME}.app"
-  PWA_DMG_OUTPUT="${OUTPUT_DIR}/${PWA_APP_NAME} ${APP_VERSION}.dmg"
+  TARGET_PATH="${OUTPUT_DIR}/${APP_NAME}.app"
   default_filename="${APP_NAME} ${APP_VERSION}.dmg"
 
   if [[ -z "${DMG_OUTPUT}" ]]; then
@@ -1122,51 +911,48 @@ validate_config() {
   if [[ "${DEPRECATED_INSTALL_FLAG_USED}" == true ]]; then
     warn "Las opciones --install-dir y --no-install estan deprecadas y ahora se ignoran. La app siempre se guarda en ${OUTPUT_DIR}."
   fi
-
-  if [[ "${CHROME_ONLY}" == true ]]; then
-    PWA_DMG_OUTPUT="${DMG_OUTPUT}"
-    info "Se generara solo el lanzador de Google Chrome, sin Nativefier."
-  elif [[ "${GENERATE_PWA}" == true ]]; then
-    info "Se generara un lanzador de Google Chrome ademas de la app de Nativefier."
-  fi
 }
 
 main() {
   if [[ "${1:-}" == --suggest-name ]]; then
-    trap - EXIT
     [[ $# -eq 2 && "${2:-}" =~ ^https?:// ]] || die "Uso: --suggest-name URL"
     derive_app_name_from_url "$2"
     return
   fi
 
   parse_args "$@"
+  [[ -n "${APP_URL}" ]] || die "Debes indicar --url."
+  [[ "${APP_URL}" =~ ^https?:// ]] || die "La URL debe comenzar con http:// o https://."
+  if [[ "${APP_MODE}" == pwa-manual-guide ]]; then
+    guide_pwa_install
+    return
+  fi
+  [[ -z "${PWA_CHROME_PROFILE_DIRECTORY}" ]] ||
+    die "--chrome-profile-directory solo se usa con --pwa-manual-guide."
+  if [[ "${APP_MODE}" == pwa ]]; then
+    install_real_pwa
+    return
+  fi
+  trap cleanup EXIT
   validate_config
   preflight_checks
   prepare_output_dir
   create_build_session
   download_icon_if_needed
-  if [[ "${CHROME_ONLY}" != true ]]; then
+  if [[ "${APP_MODE}" == chrome-window-simple ]]; then
+    create_chrome_window_app
+  else
     clear_nativefier_cache_if_requested
     create_menu_file
     run_nativefier_build
     stage_app
-    create_dmg_if_requested
   fi
-  generate_pwa_icon_if_possible
-  create_pwa_if_requested
+  create_dmg_if_requested
 
   info "Proceso completado."
-  if [[ "${CHROME_ONLY}" != true ]]; then
-    info "App de Nativefier disponible en ${TARGET_PATH}"
-    if [[ "${CREATE_DMG}" == true ]]; then
-      info "DMG de Nativefier disponible en ${DMG_OUTPUT}"
-    fi
-  fi
-  if [[ "${GENERATE_PWA}" == true ]]; then
-    info "App de Chrome disponible en ${PWA_APP_PATH}"
-    if [[ "${CREATE_DMG}" == true ]]; then
-      info "DMG de Chrome disponible en ${PWA_DMG_OUTPUT}"
-    fi
+  info "App disponible en ${TARGET_PATH}"
+  if [[ "${CREATE_DMG}" == true ]]; then
+    info "DMG disponible en ${DMG_OUTPUT}"
   fi
   if [[ "${KNOWN_EMBEDDED_LOGIN_LIMITS}" == true ]]; then
     warn "Recordatorio: para Gemini/Google el bloqueo de login depende de la politica de Google sobre navegadores embebidos."

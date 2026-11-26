@@ -4,19 +4,47 @@ Genera apps de macOS para sitios web con Google Chrome o Nativefier.
 
 ## GitHub y otros sitios con «Continuar con Google»
 
-Usa **solo Chrome** para abrir el sitio con el navegador real, sin pasar por
-el navegador embebido de Nativefier:
+Para registrar la PWA real con Chrome sin pasar por el menú:
 
 ```bash
-bash cloning-cli.sh --url https://github.com/ --chrome-only
-open "output/GitHub (Chrome)/GitHub.app"
+bash cloning-cli.sh --url https://github.com/ --pwa
 ```
 
-El lanzador usa el último perfil de Chrome por defecto. Si alternas entre
-cuentas, puedes fijar uno con `--chrome-profile-directory "Profile 1"`.
-Chrome debe estar instalado. El lanzador no registra una PWA ni modifica la
-configuración del navegador. Pillow es opcional: sin él se conserva el icono
-del sitio, sin el distintivo de Chrome.
+Chrome crea la `.app` local usando el manifiesto del sitio y un perfil
+separado; no reutiliza las cookies ni las sesiones de tu perfil habitual.
+En el perfil nuevo, Chrome no ofrece ni inicia traducciones automáticamente.
+El script omite la bienvenida de Chrome y su aviso de navegador predeterminado
+para la versión usada al instalar, sin cambiar el navegador predeterminado de
+macOS.
+El CLI muestra la ruta que creó Chrome. Si ya hay una copia de la misma
+PWA, muestra su ubicación sin reinstalar ni cambiar sus preferencias.
+Esta instalación depende de una
+[API experimental de Chrome](https://chromedevtools.github.io/devtools-protocol/tot/PWA/#method-install).
+El acceso queda ligado al perfil de la Mac: no se empaqueta como DMG portátil.
+
+En una instalación nueva, el script deja la `.app` original donde la creó
+Chrome y coloca un alias en **Macintosh HD → Aplicaciones** (`/Applications`).
+Si no puede escribir ahí o ese nombre está ocupado, usa la carpeta personal
+**`~/Applications`** sin reemplazar ningún archivo ni pedir permisos de
+administrador. Si tienes [`dockutil`](https://github.com/kcrawford/dockutil)
+en tu `PATH`, también fija la app original en el Dock. Por ejemplo, si ya
+usas Homebrew puedes instalarlo con `brew install dockutil`. Si no está
+disponible, abre la app y elige **Opciones → Mantener en el Dock**.
+Las PWAs que ya estaban instaladas no se modifican.
+
+Para usar tu perfil habitual, o si Chrome no reconoce un manifiesto que
+pueda instalar automáticamente, elige **`pwa-manual-guide`**:
+
+```bash
+bash cloning-cli.sh --url https://github.com/ --pwa-manual-guide
+```
+
+En Chrome, ve a **⋮ → Enviar, guardar y compartir → Instalar página como
+aplicación** y confirma. El modo guiado no crea archivos por sí solo.
+El flag anterior `--install-pwa` sigue siendo un alias de esta guía.
+
+Si ya la instalaste, ábrela desde el Dock o `chrome://apps`. No necesitas
+volver a ejecutar el asistente.
 
 ## Scripts
 
@@ -29,16 +57,15 @@ del sitio, sin el distintivo de Chrome.
 
 | Opción del CLI | Apps generadas | Carpeta |
 | --- | --- | --- |
-| `--chrome-only` | `<AppName>.app` con Google Chrome | `output/<AppName> (Chrome)/` |
-| Sin opción de modo | `<AppName>.app` con Nativefier | `output/<AppName>/` |
-| `--generate-pwa` | Nativefier y lanzador `<AppName> PWA.app` | `output/<AppName>/` |
+| `--pwa` | PWA real: Chrome registra una `.app` | Carpeta de apps de Chrome |
+| `--chrome-window-simple` | Acceso en ventana con Chrome `--app`, no registra la PWA; DMG opcional | `output/<AppName> (Chrome Window Simple)/` |
+| `--pwa-manual-guide` | Guía para instalar la app web desde Chrome | Sin archivos generados por el CLI |
+| Sin opción de modo | `<AppName>.app` con Nativefier y DMG opcional | `output/<AppName>/` |
 
 `--no-dmg` omite el DMG. `--dmg-output` cambia solo la ruta del DMG principal.
-Al reconstruir, se reemplaza la carpeta de salida del modo elegido. **Solo
-Chrome** usa una carpeta aparte y no toca las generaciones de Nativefier.
-La etiqueta `(Chrome)` solo distingue la carpeta: la app y el DMG usan el
-nombre del producto. El DMG contiene la misma app y sirve para copiarla a
-Aplicaciones; abrir la app desde la carpeta de salida usa el mismo Chrome.
+Al reconstruir con Nativefier o Chrome Window Simple, se reemplaza la carpeta de salida
+de esa app en el modo elegido.
+El DMG permite copiar la app generada a Aplicaciones.
 
 ## Uso interactivo
 
@@ -46,8 +73,10 @@ Aplicaciones; abrir la app desde la carpeta de salida usa el mismo Chrome.
 bash cloning-website-to-dmg.sh
 ```
 
-Elige `chrome` (por defecto), `nativefier` o `both` tras indicar la URL.
-El asistente muestra el nombre sugerido antes de generar la app. Para
+En la pregunta 2, pulsa Enter para usar **`nativefier`** (predeterminado)
+o elige **`pwa`**, **`chrome-window-simple`** o **`pwa-manual-guide`**.
+En el modo guiado puedes indicar el perfil de Chrome (por ejemplo, `Profile 1`).
+El asistente muestra el nombre sugerido antes de empaquetar la app. Para
 `github.com` es **GitHub**: dejar el nombre vacío produce la misma carpeta que
 indicar `--name GitHub`.
 
@@ -57,7 +86,6 @@ indicar `--name GitHub`.
 bash cloning-cli.sh \
   --url https://app.example.com \
   --name ExampleApp \
-  --generate-pwa \
   --internal-domain login.example.com
 ```
 
@@ -75,7 +103,9 @@ bash cloning-cli.sh \
 ## Requisitos
 
 - macOS.
-- Para Chrome: Google Chrome y Python 3. No se requiere Node.js.
+- Para PWA y Chrome Window Simple: Google Chrome y Python 3; no requieren Node.js.
+- Para PWA Manual Guide: Google Chrome. El asistente usa Python 3, si está
+  disponible, para sugerir perfiles.
 - Para Nativefier: Node.js y npm (`nativefier` se ejecuta vía `npx`).
 - La detección opcional de dominios de autenticación de Nativefier usa el
   wrapper de Playwright CLI y requiere habilitar el ejecutable con
@@ -84,5 +114,5 @@ bash cloning-cli.sh \
 ## Pruebas
 
 ```bash
-python3 tests/test_chrome_mode.py
+python3 -m unittest discover -s tests
 ```

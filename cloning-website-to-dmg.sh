@@ -14,7 +14,8 @@ Uso:
 Descripcion:
   Asistente interactivo que hace preguntas, arma el comando para
   `cloning-cli.sh` y luego lo ejecuta con los parametros elegidos.
-  Elige solo Chrome (por defecto), solo Nativefier o ambos.
+  En la pregunta 2, elige nativefier (por defecto), pwa (app web registrada
+  por Chrome), chrome-window-simple (acceso en ventana) o pwa-manual-guide (guía).
 EOF
 }
 
@@ -333,18 +334,31 @@ QUESTION_STEPS=(0 10 1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17)
 question_step_enabled() {
   local step="$1"
 
+  if [[ "${build_mode}" == pwa ]]; then
+    case "${step}" in
+      0|10|16|17) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  if [[ "${build_mode}" == pwa-manual-guide ]]; then
+    case "${step}" in
+      0|10|11|16|17) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+
   case "${step}" in
     5|8|9|13|14)
-      [[ "${build_mode}" != chrome ]]
+      [[ "${build_mode}" == nativefier ]]
       ;;
     7)
       [[ "${create_dmg}" == true ]]
       ;;
     11)
-      [[ "${build_mode}" != nativefier ]]
+      return 1
       ;;
     15)
-      [[ "${build_mode}" != chrome && "${add_extra_nativefier_args}" == true ]]
+      [[ "${build_mode}" == nativefier && "${add_extra_nativefier_args}" == true ]]
       ;;
     *)
       return 0
@@ -411,7 +425,7 @@ main() {
   local -a extra_nativefier_args=()
   local -a cmd=()
   local create_dmg=true
-  local build_mode=chrome
+  local build_mode=nativefier
   local keep_build_artifacts=false
   local keep_nativefier_cache=false
   local add_extra_nativefier_args=false
@@ -459,8 +473,8 @@ main() {
         ;;
       10)
         if prompt_text \
-          'Choose Chrome only (chrome, recommended for Google sign-in), Nativefier only (nativefier), or both (both).' \
-          'Build mode: chrome / nativefier / both' \
+          'Nativefier: macOS app (default). PWA: Chrome registers a real web app in a separate profile. Chrome Window Simple: Chrome window shortcut, with optional DMG. PWA Manual Guide: install from the Chrome menu yourself.' \
+          'Build mode: nativefier / pwa / chrome-window-simple / pwa-manual-guide' \
           "${build_mode}"; then
           rc=0
         else
@@ -472,10 +486,10 @@ main() {
         fi
         [[ ${rc} -eq 0 ]] || exit "${rc}"
         case "${PROMPT_RESULT}" in
-          chrome|nativefier|both) build_mode="${PROMPT_RESULT}" ;;
-          *) printf 'Choose chrome, nativefier, or both.\n' >&2; continue ;;
+          nativefier|pwa|chrome-window-simple|pwa-manual-guide) build_mode="${PROMPT_RESULT}" ;;
+          *) printf 'Choose nativefier, pwa, chrome-window-simple, or pwa-manual-guide.\n' >&2; continue ;;
         esac
-        step=1
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       1)
         suggested_name="$(bash "${CLI_SCRIPT}" --suggest-name "${app_url}")"
@@ -639,7 +653,7 @@ main() {
         ;;
       11)
         detect_chrome_profiles
-        chrome_profile_summary='Leave empty to use the last-used Chrome profile. Enter a profile directory only to pin the launcher to it.'
+        chrome_profile_summary='Choose the Chrome profile where you want to install the web app. Leave empty to let Chrome choose.'
         if [[ -n "${CHROME_LAST_USED_PROFILE}" ]]; then
           chrome_profile_summary+=" Last used: ${CHROME_LAST_USED_PROFILE}."
         fi
@@ -658,7 +672,7 @@ main() {
         fi
         [[ ${rc} -eq 0 ]] || exit "${rc}"
         chrome_profile_directory="${PROMPT_RESULT}"
-        step=12
+        step="$(adjacent_question_step "${step}" next)"
         ;;
       12)
         if prompt_yes_no \
@@ -736,6 +750,26 @@ main() {
         ;;
       16)
         cmd=("bash" "${CLI_SCRIPT}" "--url" "${app_url}")
+        if [[ "${build_mode}" == pwa ]]; then
+          cmd+=("--pwa")
+          printf '\nChrome will register the .app in a separate profile if it is not already installed. No DMG is generated.\n'
+          printf '\nGenerated command:\n%s\n' "$(print_command "${cmd[@]}")"
+          step=17
+          continue
+        fi
+        if [[ "${build_mode}" == pwa-manual-guide ]]; then
+          cmd+=("--pwa-manual-guide")
+          if [[ -n "${chrome_profile_directory}" ]]; then
+            cmd+=("--chrome-profile-directory" "${chrome_profile_directory}")
+          fi
+          printf '\nComplete the installation from the Chrome menu. No DMG is generated.\n'
+          printf '\nGenerated command:\n%s\n' "$(print_command "${cmd[@]}")"
+          step=17
+          continue
+        fi
+        if [[ "${build_mode}" == chrome-window-simple ]]; then
+          cmd+=("--chrome-window-simple")
+        fi
         if [[ -n "${app_name}" ]]; then
           cmd+=("--name" "${app_name}")
         fi
@@ -755,17 +789,10 @@ main() {
         else
           cmd+=("--no-dmg")
         fi
-        case "${build_mode}" in
-          chrome) cmd+=("--chrome-only") ;;
-          both) cmd+=("--generate-pwa") ;;
-        esac
-        if [[ "${build_mode}" != nativefier && -n "${chrome_profile_directory}" ]]; then
-          cmd+=("--chrome-profile-directory" "${chrome_profile_directory}")
-        fi
         if [[ "${keep_build_artifacts}" == true ]]; then
           cmd+=("--keep-build-artifacts")
         fi
-        if [[ "${build_mode}" != chrome ]]; then
+        if [[ "${build_mode}" == nativefier ]]; then
           if [[ -n "${user_agent}" ]]; then
             cmd+=("--user-agent" "${user_agent}")
           fi
@@ -816,7 +843,7 @@ main() {
           extra_nativefier_args=()
           cmd=()
           create_dmg=true
-          build_mode=chrome
+          build_mode=nativefier
           keep_build_artifacts=false
           keep_nativefier_cache=false
           add_extra_nativefier_args=false
